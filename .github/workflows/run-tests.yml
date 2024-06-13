@@ -4,7 +4,7 @@ on: [push, pull_request]
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.experimental }} # Experimental builds may fail
 
     defaults:
@@ -18,26 +18,31 @@ jobs:
       matrix:
         include:
           - irods: "4.2.7"
-            client_image: "ghcr.io/wtsi-npg/ub-16.04-irods-clients-4.2.7:latest"
+            client_bundle: "https://github.com/wtsi-npg/containers/releases/download/5.2/bundle-ub-16.04-irods-clients-4.2.7.tgz"
             server_image: "ghcr.io/wtsi-npg/ub-16.04-irods-4.2.7:latest"
+            os: "ubuntu-20.04"
             experimental: false
-          - irods: "4.2.11"
-            client_image: "ghcr.io/wtsi-npg/ub-18.04-irods-clients-4.2.11:latest"
-            server_image: "ghcr.io/wtsi-npg/ub-18.04-irods-4.2.11:latest"
-            experimental: false
-          - irods: "4.2.12"
-            client_image: "ghcr.io/wtsi-npg/ub-18.04-irods-clients-4.2.12:latest"
-            server_image: "ghcr.io/wtsi-npg/ub-18.04-irods-4.2.12:latest"
-            experimental: false
-          - irods: "4.3.1"
-            client_image: "ghcr.io/wtsi-npg/ub-22.04-irods-clients-4.3.1:latest"
-            server_image: "ghcr.io/wtsi-npg/ub-22.04-irods-4.3.1:latest"
-            experimental: false
-          - irods: "4.3.2"
-            client_image: "ghcr.io/wtsi-npg/ub-22.04-irods-clients-4.3.2:latest"
-            server_image: "ghcr.io/wtsi-npg/ub-22.04-irods-4.3.2:latest"
-            experimental: true
-
+          #- irods: "4.2.7"
+          #  client_image: "ghcr.io/wtsi-npg/ub-16.04-irods-clients-4.2.7:latest"
+          #  server_image: "ghcr.io/wtsi-npg/ub-16.04-irods-4.2.7:latest"
+          #  experimental: false
+          #- irods: "4.2.11"
+          #  client_image: "ghcr.io/wtsi-npg/ub-18.04-irods-clients-4.2.11:latest"
+          #  server_image: "ghcr.io/wtsi-npg/ub-18.04-irods-4.2.11:latest"
+          #  experimental: false
+          #- irods: "4.2.12"
+          #  client_image: "ghcr.io/wtsi-npg/ub-18.04-irods-clients-4.2.12:latest"
+          #  server_image: "ghcr.io/wtsi-npg/ub-18.04-irods-4.2.12:latest"
+          #  experimental: false
+          #- irods: "4.3.1"
+          #  client_image: "ghcr.io/wtsi-npg/ub-22.04-irods-clients-4.3.1:latest"
+          #  server_image: "ghcr.io/wtsi-npg/ub-22.04-irods-4.3.1:latest"
+          #  experimental: false
+          #- irods: "4.3.2"
+          #  client_image: "ghcr.io/wtsi-npg/ub-22.04-irods-clients-4.3.2:latest"
+          #  server_image: "ghcr.io/wtsi-npg/ub-22.04-irods-4.3.2:latest"
+          #  experimental: true
+#
     services:
       irods-server:
         image: ${{ matrix.server_image }}
@@ -63,6 +68,7 @@ jobs:
         cache: true
 
     - name: "Install Singularity"
+      if: ${{ matrix.client_image }}
       run: |
         pkg="singularity-ce_${SINGULARITY_VERSION}-$(lsb_release -sc)_amd64.deb"
         curl -sSL -O "https://github.com/sylabs/singularity/releases/download/v${SINGULARITY_VERSION}/$pkg"
@@ -79,12 +85,20 @@ jobs:
         echo DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" >> $GITHUB_ENV
 
     - name: "Cache Singularity images"
+      if: ${{ matrix.client_image }}
       uses: actions/cache@v4
       with:
         path: ${{ github.workspace }}/.singularity-cache
         key: ${{ runner.os }}-singularity
 
+    - name: "Extract Exodus clients from bundle"
+      if: ${{ matrix.client_bundle }}
+      run: |
+        wget -O client_bundle.tgz ${{ matrix.client_bundle }}
+        tar -xf client_bundle.tgz -C $HOME
+
     - name: "Install iRODS client wrappers"
+      if: ${{ matrix.client_image }}
       env:
         DOCKER_IMAGE: ${{ matrix.client_image }}
         PREFIX: ${{ github.workspace }}
@@ -94,7 +108,34 @@ jobs:
         singularity exec docker://$DOCKER_IMAGE singularity-wrapper -s -p $PREFIX install
         echo "$PREFIX/bin" >> $GITHUB_PATH
 
+    - name: "Create Exodus client wrappers"
+      if: ${{ matrix.client_bundle }}
+      env:
+        client_names: "baton-chmod baton-do baton-get baton-list baton-metamod baton-metaquery baton-put baton-specificquery iinit ils imeta"
+        PREFIX: ${{ github.workspace }}
+      run: |
+        exodus_home=$HOME/exodus
+        bundle_dir=$(ls $exodus_home/bundles)
+        mkdir $PREFIX/bin
+        for item in ${{ env.client_names }}; do
+          cat <<EOF > "$PREFIX/bin/$item"
+        #! /bin/bash
+
+        # This is a wrapper script allowing icommands and baton executables to find
+        # required libraries when they are moved to another system using exodus.
+
+        client_lib=${exodus_home}/bundles/${bundle_dir}/lib/x86_64-linux-gnu
+        client_usr_lib=${exodus_home}/bundles/${bundle_dir}/usr/lib/x86_64-linux-gnu
+        client_ext=${exodus_home}/bundles/${bundle_dir}/opt/irods-externals
+
+        LD_PRELOAD=\$client_ext/libarchive3.3.2-0/lib/libarchive.so.16:\$client_lib/libcrypto.so.1.0.0:\$client_lib/libssl.so.1.0.0:\$client_usr_lib/libxml2.so.2:\$client_usr_lib/libicuuc.so.55:\$client_usr_lib/libicudata.so.55 ${exodus_home}/bin/${item} $@
+        EOF
+        chmod 755 "$PREFIX/bin/$item"
+        done;
+        echo "$PREFIX/bin" >> $GITHUB_PATH
+
     - name: "Configure iRODS clients"
+      if: ${{ matrix.client_image }}
       env:
         DOCKER_IMAGE: ${{ matrix.client_image }}
         PREFIX: ${{ github.workspace }}
@@ -118,6 +159,36 @@ jobs:
         ils
         ilsresc
 
+        baton-do --version
+
+    # The exodus clients require an explicit path to plugins because they have
+    # been transplanted. Most icommands that are not used by valet or
+    # environment setup are excluded from the exodus bundle for simplicity,
+    # so ienv and ilsresc are omitted from checks here
+    - name: "Configure iRODS clients for Exodus wrappers"
+      if: ${{ matrix.client_bundle }}
+      env:
+        PREFIX: ${{ github.workspace }}
+      run: |
+        exodus_home=$HOME/exodus
+        bundle_dir=$(ls $exodus_home/bundles)
+        mkdir -p "$HOME/.irods"
+        cat <<EOF > "$HOME/.irods/irods_environment.json"
+        {
+            "irods_host": "localhost",
+            "irods_port": 1247,
+            "irods_user_name": "irods",
+            "irods_zone_name": "testZone",
+            "irods_home": "/testZone/home/irods",
+            "irods_default_resource": "replResc",
+            "irods_default_hash_scheme": "MD5",
+            "irods_plugins_home": "${exodus_home}/bundles/${bundle_dir}/usr/lib/irods/plugins/"
+        }
+        EOF
+
+        echo "irods" | script -q -c "$PREFIX/bin/iinit" /dev/null
+        $PREFIX/bin/ils
+        
         baton-do --version
 
     - name: "Install test runner"
